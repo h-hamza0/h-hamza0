@@ -18,6 +18,8 @@
   <img src="assets/gallery.svg" alt="Rotating gallery of molecular graphics, starting with the Chemical Reviews cover" width="820">
 </p>
 
+<p align="center"><sub>Everything in this gallery was made in <a href="https://www.blender.org/">Blender</a>: molecular structures and simulation data rendered as 3D scenes.</sub></p>
+
 <p align="center"><sub><b>Note:</b> the <i>Chemical Reviews</i> cover is Benjamin Elling's project. I helped make it but was not the main author.</sub></p>
 
 ## Featured projects
