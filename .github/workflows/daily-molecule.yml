@@ -1,0 +1,30 @@
+name: molecule of the day
+
+on:
+  schedule:
+    - cron: "5 0 * * *"
+  workflow_dispatch:
+  push:
+    paths: ["scripts/**", "model/**"]
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q
+      - run: python scripts/molecule_of_the_day.py
+      - name: Commit updated widget
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add assets/molecule-of-the-day.svg
+          git diff --cached --quiet || git commit -m "Update molecule of the day"
+          git push

@@ -1,0 +1,10 @@
+{
+  "dataset": "MoleculeNet Lipophilicity (experimental logD 7.4)",
+  "n_molecules": 4200,
+  "n_test": 420,
+  "test_rmse": 0.603,
+  "test_r2": 0.731,
+  "baseline_rmse": 1.162,
+  "epochs": 120,
+  "seed": 0
+}
