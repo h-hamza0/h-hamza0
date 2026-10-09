@@ -44,7 +44,7 @@
 [`.github/workflows/daily-molecule.yml`](.github/workflows/daily-molecule.yml) runs every day at 00:05 UTC and picks the next molecule from a [curated list](scripts/molecules.py) of drug-like compounds.
 
 1. **3D structure:** RDKit embeds the molecule and relaxes it with MMFF94.
-2. **GNN readout:** a small message-passing network ([`scripts/gnn.py`](scripts/gnn.py)) predicts lipophilicity (logD at pH 7.4). The glow you see travelling over atoms and bonds is the norm of each atom's hidden state after the embedding and each of the three message-passing rounds.
+2. **GNN readout:** a small message-passing network ([`scripts/gnn.py`](scripts/gnn.py)) predicts lipophilicity (logD at pH 7.4). The pulses travelling along each bond (in both directions) are the actual messages of the three message-passing rounds, sized by their magnitude. The glow that follows on each atom is the norm of its updated hidden state.
 3. **Descriptors:** molecular weight, Crippen cLogP, TPSA, H-bond donors/acceptors and rotatable bonds come straight from RDKit.
 4. **Rendering:** the output is a single self-contained animated SVG with no external services.
 

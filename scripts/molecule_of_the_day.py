@@ -78,19 +78,79 @@ def stage_windows() -> list[tuple[float, float]]:
     return [(k / (2 * steps), (k + 1) / (2 * steps)) for k in range(steps)] + [(0.5, 0.625)]
 
 
-def timeline(levels: list[np.ndarray], n_atoms: int):
-    """keyTimes plus, for every atom, its glow level at each key time."""
-    windows = stage_windows()
-    per_stage = levels + [np.full(n_atoms, 0.6)]
-    times, glow = [0.0], [np.zeros(n_atoms)]
-    eps = 0.006
-    for (start, end), level in zip(windows, per_stage):
+def travel_span(window: tuple[float, float]) -> tuple[float, float]:
+    width = window[1] - window[0]
+    return window[0] + 0.08 * width, window[0] + 0.68 * width
+
+
+def arrival_span(window: tuple[float, float]) -> tuple[float, float]:
+    width = window[1] - window[0]
+    return window[0] + 0.6 * width, window[1]
+
+
+def timeline(spans: list[tuple[float, float, np.ndarray]], n: int):
+    """keyTimes and, per entity, a level that rises and falls inside each (start, end, levels) span."""
+    times, values = [0.0], [np.zeros(n)]
+    eps = 0.004
+    for start, end, level in spans:
         for t, g in ((start, 0.0), (start + eps, 1.0), (end - eps, 1.0), (end, 0.0)):
             times.append(max(t, times[-1] + 1e-4))
-            glow.append(level * g)
+            values.append(level * g)
     times.append(1.0)
-    glow.append(np.zeros(n_atoms))
-    return times, np.array(glow)
+    values.append(np.zeros(n))
+    return times, np.array(values)
+
+
+def edge_messages(weights: dict[str, np.ndarray], layers: list[np.ndarray], edges: np.ndarray) -> list[np.ndarray]:
+    """Magnitude of the message sent along every directed edge in each message-passing round."""
+    src, dst = edges
+    degree = np.bincount(dst, minlength=len(layers[0])).clip(min=1)
+    levels = []
+    for k in range(N_LAYERS):
+        norm = np.linalg.norm(layers[k] @ weights[f"nbr_w{k}"], axis=1)[src] / degree[dst]
+        spread = norm.max() - norm.min()
+        levels.append(0.2 + 0.8 * (norm - norm.min()) / spread if spread > 1e-9 else np.full(len(norm), 0.6))
+    return levels
+
+
+def interpolate_frames(frames: np.ndarray, t: float) -> np.ndarray:
+    position = (t % 1.0) * N_FRAMES
+    lower = int(np.floor(position))
+    weight = position - lower
+    return frames[lower] * (1 - weight) + frames[min(lower + 1, N_FRAMES)] * weight
+
+
+def particle_tracks(frames, edges, messages, windows, samples=16):
+    """Per directed edge: keyTimes, positions, opacities and radii for a pulse that travels src -> dst."""
+    tracks = []
+    for e in range(edges.shape[1]):
+        i, j = edges[0, e], edges[1, e]
+        times, positions, opacity, radius = [0.0], [frames[0, i]], [0.0], [3.0]
+        for k, level in enumerate(m[e] for m in messages):
+            t0, t1 = travel_span(windows[k + 1])
+            times.append(max(t0 - 1e-4, times[-1] + 1e-4))
+            positions.append(frames[int(t0 * N_FRAMES) % N_FRAMES, i])
+            opacity.append(0.0)
+            radius.append(3.0 + 4.0 * level)
+            for n in range(samples):
+                s = n / (samples - 1)
+                t = t0 + (t1 - t0) * s
+                frame = interpolate_frames(frames, t)
+                times.append(max(t, times[-1] + 1e-4))
+                positions.append(frame[i] + (frame[j] - frame[i]) * s)
+                fade = min(1.0, 4 * s, 4 * (1 - s) + 0.15)
+                opacity.append(round(float(fade * (0.55 + 0.45 * level)), 2))
+                radius.append(3.0 + 4.0 * level)
+            times.append(times[-1] + 1e-4)
+            positions.append(positions[-1])
+            opacity.append(0.0)
+            radius.append(3.0 + 4.0 * level)
+        times.append(1.0)
+        positions.append(positions[-1])
+        opacity.append(0.0)
+        radius.append(3.0)
+        tracks.append((times, positions, opacity, radius))
+    return tracks
 
 
 def fmt(values) -> str:
@@ -115,10 +175,29 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
     weights = dict(np.load(ROOT / "model" / "gnn_lipophilicity.npz"))
     metrics = json.loads((ROOT / "model" / "metrics.json").read_text())
     heavy, coords = embed_3d(smiles)
-    prediction, layers = forward(weights, *featurize(heavy))
+    x, edge_index = featurize(heavy)
+    prediction, layers = forward(weights, x, edge_index)
     n = heavy.GetNumAtoms()
     frames = rotated_frames(coords)
-    key_times, glow = timeline(activation_levels(layers), n)
+    windows = stage_windows()
+    atom_levels = activation_levels(layers)
+    messages = edge_messages(weights, layers, edge_index)
+    key_times, glow = timeline(
+        [(*windows[0], atom_levels[0])]
+        + [(*arrival_span(windows[k + 1]), atom_levels[k + 1]) for k in range(N_LAYERS)]
+        + [(*windows[-1], np.full(n, 0.6))],
+        n,
+    )
+    n_bonds = edge_index.shape[1] // 2
+    ends = edge_index[:, ::2]
+    bond_mean = lambda level: (level[::2] + level[1::2]) / 2
+    bond_times, bond_glow = timeline(
+        [(*windows[0], (atom_levels[0][ends[0]] + atom_levels[0][ends[1]]) / 2)]
+        + [(*travel_span(windows[k + 1]), bond_mean(messages[k])) for k in range(N_LAYERS)]
+        + [(*windows[-1], np.full(n_bonds, 0.35))],
+        n_bonds,
+    )
+    bond_kt = ";".join(f"{t:.4f}" for t in bond_times)
     kek = Chem.Mol(heavy)
     Chem.Kekulize(kek, clearAromaticFlags=True)
 
@@ -135,17 +214,29 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
     loop_kt = ";".join(f"{k / N_FRAMES:.4f}" for k in range(N_FRAMES + 1))
 
     bonds = []
-    for bond in kek.GetBonds():
+    for b, bond in enumerate(kek.GetBonds()):
         i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         order = {Chem.BondType.SINGLE: 1, Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3}.get(bond.GetBondType(), 1)
         paths = ";".join(bond_path(frames[k, i], frames[k, j], order) for k in range(N_FRAMES + 1))
-        colours = ";".join(mix(BASE_BOND, BRIGHT, (glow[s, i] + glow[s, j]) / 2) for s in range(len(key_times)))
-        widths = fmt([round(float(2.6 + 2.4 * (glow[s, i] + glow[s, j]) / 2), 2) for s in range(len(key_times))])
+        colours = ";".join(mix(BASE_BOND, BRIGHT, bond_glow[s, b]) for s in range(len(bond_times)))
+        widths = fmt([round(float(2.6 + 2.0 * bond_glow[s, b]), 2) for s in range(len(bond_times))])
         bonds.append(
             f'<path fill="none" stroke="{BASE_BOND}" stroke-width="2.6" stroke-linecap="round" d="{bond_path(frames[0, i], frames[0, j], order)}">'
             f'<animate attributeName="d" values="{paths}" keyTimes="{loop_kt}" {anim}/>'
-            f'<animate attributeName="stroke" values="{colours}" keyTimes="{kt}" {anim}/>'
-            f'<animate attributeName="stroke-width" values="{widths}" keyTimes="{kt}" {anim}/></path>'
+            f'<animate attributeName="stroke" values="{colours}" keyTimes="{bond_kt}" {anim}/>'
+            f'<animate attributeName="stroke-width" values="{widths}" keyTimes="{bond_kt}" {anim}/></path>'
+        )
+
+    particles = []
+    for times, positions, opacity, radius in particle_tracks(frames, edge_index, messages, windows):
+        particle_kt = ";".join(f"{t:.4f}" for t in times)
+        moves = ";".join(f"{p[0]:.1f} {p[1]:.1f}" for p in positions)
+        particles.append(
+            f'<g transform="translate({positions[0][0]:.1f} {positions[0][1]:.1f})">'
+            f'<animateTransform attributeName="transform" type="translate" values="{moves}" keyTimes="{particle_kt}" {anim}/>'
+            f'<circle r="3" fill="{BRIGHT}" opacity="0">'
+            f'<animate attributeName="opacity" values="{fmt(opacity)}" keyTimes="{particle_kt}" {anim}/>'
+            f'<animate attributeName="r" values="{fmt([round(float(r), 1) for r in radius])}" keyTimes="{particle_kt}" {anim}/></circle></g>'
         )
 
     atoms = []
@@ -185,7 +276,7 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
 <title id="t">Molecule of the day: {escape(name)}</title>
 <desc id="d">A rotating 3D structure of {escape(name)} while a graph neural network predicts its lipophilicity (logD) as {prediction:.2f}.</desc>
 <rect x="1" y="1" width="{WIDTH - 2}" height="{HEIGHT - 2}" rx="14" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
-<g>{"".join(bonds)}{"".join(atoms)}</g>
+<g>{"".join(bonds)}{"".join(particles)}{"".join(atoms)}</g>
 <line x1="410" y1="26" x2="410" y2="{HEIGHT - 26}" stroke="#30363d"/>
 <text x="445" y="46" font-size="11" letter-spacing="2" fill="#8b949e">MOLECULE OF THE DAY</text>
 <text x="445" y="82" font-size="30" font-weight="700" fill="#f0f6fc">{escape(name)}</text>
