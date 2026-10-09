@@ -22,7 +22,7 @@ TILT = np.radians(22)
 MOLECULE_CENTRE = (205, 190)
 MOLECULE_RADIUS = 165
 GAUGE_RANGE = (-1.5, 4.5)
-BASE_BOND, ACTIVE = "#6e7681", "#2dd4bf"
+BASE_BOND, ACTIVE, BRIGHT = "#6e7681", "#2dd4bf", "#99f6e4"
 CPK = {6: "#8b949e", 7: "#58a6ff", 8: "#f85149", 9: "#7ee787", 15: "#ffa657", 16: "#e3b341", 17: "#3fb950", 35: "#bc6c25", 53: "#bc8cff"}
 SYMBOL_RADIUS = {6: 4.5}
 STAGES = ["Atom embedding", "Message passing 1", "Message passing 2", "Message passing 3", "Readout"]
@@ -65,8 +65,12 @@ def mix(c0: str, c1: str, t: float) -> str:
 
 
 def activation_levels(layers: list[np.ndarray]) -> list[np.ndarray]:
-    norms = [np.linalg.norm(h, axis=1) for h in layers]
-    return [n / max(n.max(), 1e-9) for n in norms]
+    levels = []
+    for h in layers:
+        norm = np.linalg.norm(h, axis=1)
+        spread = norm.max() - norm.min()
+        levels.append(0.15 + 0.85 * (norm - norm.min()) / spread if spread > 1e-9 else np.full(len(norm), 0.6))
+    return levels
 
 
 def stage_windows() -> list[tuple[float, float]]:
@@ -135,11 +139,13 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
         i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
         order = {Chem.BondType.SINGLE: 1, Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3}.get(bond.GetBondType(), 1)
         paths = ";".join(bond_path(frames[k, i], frames[k, j], order) for k in range(N_FRAMES + 1))
-        colours = ";".join(mix(BASE_BOND, ACTIVE, (glow[s, i] + glow[s, j]) / 2) for s in range(len(key_times)))
+        colours = ";".join(mix(BASE_BOND, BRIGHT, (glow[s, i] + glow[s, j]) / 2) for s in range(len(key_times)))
+        widths = fmt([round(float(2.6 + 2.4 * (glow[s, i] + glow[s, j]) / 2), 2) for s in range(len(key_times))])
         bonds.append(
-            f'<path fill="none" stroke="{BASE_BOND}" stroke-width="2.4" stroke-linecap="round" d="{bond_path(frames[0, i], frames[0, j], order)}">'
+            f'<path fill="none" stroke="{BASE_BOND}" stroke-width="2.6" stroke-linecap="round" d="{bond_path(frames[0, i], frames[0, j], order)}">'
             f'<animate attributeName="d" values="{paths}" keyTimes="{loop_kt}" {anim}/>'
-            f'<animate attributeName="stroke" values="{colours}" keyTimes="{kt}" {anim}/></path>'
+            f'<animate attributeName="stroke" values="{colours}" keyTimes="{kt}" {anim}/>'
+            f'<animate attributeName="stroke-width" values="{widths}" keyTimes="{kt}" {anim}/></path>'
         )
 
     atoms = []
@@ -151,7 +157,9 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
         atoms.append(
             f'<g transform="translate({frames[0, i, 0]:.1f} {frames[0, i, 1]:.1f})">'
             f'<animateTransform attributeName="transform" type="translate" values="{positions}" keyTimes="{loop_kt}" {anim}/>'
-            f'<circle r="{r + 7}" fill="{ACTIVE}" opacity="0"><animate attributeName="opacity" values="{fmt([round(float(0.75 * v), 2) for v in glow[:, i]])}" keyTimes="{kt}" {anim}/></circle>'
+            f'<circle r="{r + 5}" fill="{ACTIVE}" opacity="0">'
+            f'<animate attributeName="opacity" values="{fmt([round(float(0.4 + 0.6 * v) if v > 0 else 0.0, 2) for v in glow[:, i]])}" keyTimes="{kt}" {anim}/>'
+            f'<animate attributeName="r" values="{fmt([round(float(r + 4 + 11 * v), 1) for v in glow[:, i]])}" keyTimes="{kt}" {anim}/></circle>'
             f'<circle r="{r}" fill="{CPK.get(z, "#c9d1d9")}"/>{label}</g>'
         )
 
