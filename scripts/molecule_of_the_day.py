@@ -17,7 +17,7 @@ from molecules import MOLECULES
 ROOT = Path(__file__).resolve().parent.parent
 WIDTH, HEIGHT = 820, 380
 LOOP_SECONDS = 12
-N_FRAMES = 60
+N_FRAMES = 96
 TILT = np.radians(22)
 MOLECULE_CENTRE = (205, 190)
 MOLECULE_RADIUS = 165
@@ -80,23 +80,34 @@ def stage_windows() -> list[tuple[float, float]]:
 
 def travel_span(window: tuple[float, float]) -> tuple[float, float]:
     width = window[1] - window[0]
-    return window[0] + 0.08 * width, window[0] + 0.68 * width
+    return window[0] + 0.02 * width, window[0] + 0.82 * width
 
 
 def arrival_span(window: tuple[float, float]) -> tuple[float, float]:
     width = window[1] - window[0]
-    return window[0] + 0.6 * width, window[1]
+    return window[0] + 0.6 * width, window[1] + 0.3 * width
 
 
-def timeline(spans: list[tuple[float, float, np.ndarray]], n: int):
-    """keyTimes and, per entity, a level that rises and falls inside each (start, end, levels) span."""
+def smoothstep(x: float) -> float:
+    x = min(max(x, 0.0), 1.0)
+    return x * x * (3 - 2 * x)
+
+
+def timeline(spans: list[tuple[float, float, np.ndarray]], n: int, rise: float = 0.3, fall: float = 0.4, steps: int = 6):
+    """keyTimes and, per entity, a level that eases up and down inside each (start, end, levels) span."""
     times, values = [0.0], [np.zeros(n)]
-    eps = 0.004
+
+    def add(t: float, g: float, level: np.ndarray) -> None:
+        times.append(max(t, times[-1] + 1e-4))
+        values.append(level * g)
+
     for start, end, level in spans:
-        for t, g in ((start, 0.0), (start + eps, 1.0), (end - eps, 1.0), (end, 0.0)):
-            times.append(max(t, times[-1] + 1e-4))
-            values.append(level * g)
-    times.append(1.0)
+        width = end - start
+        for k in range(steps + 1):
+            add(start + rise * width * k / steps, smoothstep(k / steps), level)
+        for k in range(1, steps + 1):
+            add(end - fall * width + fall * width * k / steps, 1 - smoothstep(k / steps), level)
+    times.append(max(1.0, times[-1] + 1e-4))
     values.append(np.zeros(n))
     return times, np.array(values)
 
@@ -120,35 +131,29 @@ def interpolate_frames(frames: np.ndarray, t: float) -> np.ndarray:
     return frames[lower] * (1 - weight) + frames[min(lower + 1, N_FRAMES)] * weight
 
 
-def particle_tracks(frames, edges, messages, windows, samples=16):
+def particle_tracks(frames, edges, messages, windows, samples=24):
     """Per directed edge: keyTimes, positions, opacities and radii for a pulse that travels src -> dst."""
     tracks = []
     for e in range(edges.shape[1]):
         i, j = edges[0, e], edges[1, e]
-        times, positions, opacity, radius = [0.0], [frames[0, i]], [0.0], [3.0]
+        times, positions, opacity, radius = [0.0], [frames[0, i]], [0.0], [0.0]
         for k, level in enumerate(m[e] for m in messages):
             t0, t1 = travel_span(windows[k + 1])
-            times.append(max(t0 - 1e-4, times[-1] + 1e-4))
-            positions.append(frames[int(t0 * N_FRAMES) % N_FRAMES, i])
-            opacity.append(0.0)
-            radius.append(3.0 + 4.0 * level)
+            size = 3.0 + 4.0 * level
             for n in range(samples):
                 s = n / (samples - 1)
                 t = t0 + (t1 - t0) * s
                 frame = interpolate_frames(frames, t)
+                eased = smoothstep(s)
+                envelope = smoothstep(s / 0.22) * smoothstep((1 - s) / 0.22)
                 times.append(max(t, times[-1] + 1e-4))
-                positions.append(frame[i] + (frame[j] - frame[i]) * s)
-                fade = min(1.0, 4 * s, 4 * (1 - s) + 0.15)
-                opacity.append(round(float(fade * (0.55 + 0.45 * level)), 2))
-                radius.append(3.0 + 4.0 * level)
-            times.append(times[-1] + 1e-4)
-            positions.append(positions[-1])
-            opacity.append(0.0)
-            radius.append(3.0 + 4.0 * level)
-        times.append(1.0)
+                positions.append(frame[i] + (frame[j] - frame[i]) * eased)
+                opacity.append(round(float(envelope * (0.6 + 0.4 * level)), 2))
+                radius.append(round(float(size * (0.5 + 0.5 * envelope)), 1))
+        times.append(max(1.0, times[-1] + 1e-4))
         positions.append(positions[-1])
         opacity.append(0.0)
-        radius.append(3.0)
+        radius.append(0.0)
         tracks.append((times, positions, opacity, radius))
     return tracks
 
@@ -185,7 +190,7 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
     key_times, glow = timeline(
         [(*windows[0], atom_levels[0])]
         + [(*arrival_span(windows[k + 1]), atom_levels[k + 1]) for k in range(N_LAYERS)]
-        + [(*windows[-1], np.full(n, 0.6))],
+        + [(windows[-1][0] + 0.03, windows[-1][1], np.full(n, 0.6))],
         n,
     )
     n_bonds = edge_index.shape[1] // 2
@@ -194,7 +199,7 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
     bond_times, bond_glow = timeline(
         [(*windows[0], (atom_levels[0][ends[0]] + atom_levels[0][ends[1]]) / 2)]
         + [(*travel_span(windows[k + 1]), bond_mean(messages[k])) for k in range(N_LAYERS)]
-        + [(*windows[-1], np.full(n_bonds, 0.35))],
+        + [(windows[-1][0] + 0.03, windows[-1][1], np.full(n_bonds, 0.35))],
         n_bonds,
     )
     bond_kt = ";".join(f"{t:.4f}" for t in bond_times)
@@ -259,7 +264,7 @@ def build_svg(name: str, smiles: str) -> tuple[str, dict]:
     for k, label in enumerate(STAGES):
         start, end = windows[k]
         values = fmt([0.35, 0.35, 1.0, 1.0, 0.35, 0.35])
-        times = f"0;{start:.4f};{start + 0.006:.4f};{end - 0.006:.4f};{end:.4f};1"
+        times = f"0;{max(start - 0.012, 0.001):.4f};{start + 0.012:.4f};{end - 0.012:.4f};{end + 0.012:.4f};1"
         steps.append(
             f'<g transform="translate(445 {132 + 24 * k})"><circle cx="5" cy="-4" r="4" fill="{ACTIVE}">'
             f'<animate attributeName="opacity" values="{values}" keyTimes="{times}" {anim}/></circle>'
